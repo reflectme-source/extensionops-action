@@ -72,6 +72,28 @@ function scanFile(file, content) {
     }
   });
 
+  if (/\.ya?ml$/i.test(file)) {
+    lines.forEach((line, index) => {
+      if (!/uses:\s*PlasmoHQ\/bpp@v3(?:\s|$)/i.test(line)) return;
+      const context = lines
+        .slice(Math.max(0, index - 3), Math.min(lines.length, index + 15))
+        .join("\n");
+      const explicitChrome =
+        /(?:artifact|chrome-file|chrome-zip|chromeFile|chromeZip)\s*:\s*[^\n#]*chrome/i.test(
+          context,
+        );
+      addFinding({
+        ruleId: "CWS_LEGACY_BPP_V3",
+        ruleVersion: "1.0.0",
+        severity: explicitChrome ? "blocker" : "high",
+        file,
+        line: index + 1,
+        evidence: context.slice(0, 1200),
+        policySource: "https://developer.chrome.com/docs/webstore/api/v1",
+      });
+    });
+  }
+
   if (isChromeManifestPath(file)) {
     manifestFiles.push({ file, content });
   }
