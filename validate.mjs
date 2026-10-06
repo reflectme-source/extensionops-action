@@ -45,10 +45,50 @@ function addFinding(finding) {
   findings.push({ ...finding, evidenceVersion: "1" });
 }
 
+function isCwsReferenceOnlySource(file, content) {
+  const normalized = file.replaceAll("\\", "/").toLowerCase();
+
+  if (
+    /(^|\/)(?:test|tests|__tests__|fixtures?|docs?|examples?)(\/|$)/.test(
+      normalized,
+    ) ||
+    /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(normalized)
+  ) {
+    return true;
+  }
+
+  if (
+    content.includes("const V1_MARKERS") &&
+    content.includes("scanCwsV1(")
+  ) {
+    return true;
+  }
+
+  if (
+    content.includes("const V1_UPLOAD") &&
+    content.includes("const V1_PUBLISH") &&
+    content.includes("patchShellCwsV1(")
+  ) {
+    return true;
+  }
+
+  if (
+    content.includes("const QUERIES") &&
+    content.includes("search/code") &&
+    content.includes("scanRepository")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function scanFile(file, content) {
   const lines = content.split(/\r?\n/);
+  const cwsReferenceOnly = isCwsReferenceOnlySource(file, content);
+
   lines.forEach((line, index) => {
-    if (line.includes("chromewebstore/v1.1/items")) {
+    if (!cwsReferenceOnly && line.includes("chromewebstore/v1.1/items")) {
       addFinding({
         ruleId: "CWS_API_V1_ENDPOINT",
         ruleVersion: "1.0.0",
