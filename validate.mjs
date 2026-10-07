@@ -17,6 +17,7 @@ const ignored = new Set([
 ]);
 const findings = [];
 const manifestFiles = [];
+const extensionSourceChunks = [];
 const packageFiles = [];
 const lockDirs = new Set();
 const lockfileNames = new Set([
@@ -271,6 +272,9 @@ function scanExtensionSecurity(file, content) {
 }
 
 function scanFile(file, content) {
+  if (isExtensionSourceCandidate(file)) {
+    extensionSourceChunks.push(content);
+  }
   const lines = content.split(/\r?\n/);
   const cwsReferenceOnly = isCwsReferenceOnlySource(file, content);
 
@@ -638,6 +642,76 @@ function scanDependencyFiles() {
   }
 }
 
+function scanPermissionConsistency(activeManifests) {
+  const required = new Set();
+  const optional = new Set();
+  for (const candidate of activeManifests) {
+    try {
+      const manifest = JSON.parse(candidate.content);
+      for (const value of manifest.permissions || []) required.add(value);
+      for (const value of manifest.optional_permissions || []) optional.add(value);
+    } catch {
+      // Manifest parse errors are already reported by scanManifestFile.
+    }
+  }
+
+  const declared = new Set([...required, ...optional]);
+  const source = extensionSourceChunks.join("\n");
+  const apiPermissions = new Map([
+    ["history", ["chrome.history", "browser.history"]],
+    ["cookies", ["chrome.cookies", "browser.cookies"]],
+    ["webRequest", ["chrome.webRequest", "browser.webRequest"]],
+    ["webRequestBlocking", ["chrome.webRequest", "browser.webRequest"]],
+    ["management", ["chrome.management", "browser.management"]],
+    ["debugger", ["chrome.debugger", "browser.debugger"]],
+    ["privacy", ["chrome.privacy", "browser.privacy"]],
+    ["downloads", ["chrome.downloads", "browser.downloads"]],
+    ["bookmarks", ["chrome.bookmarks", "browser.bookmarks"]],
+    ["notifications", ["chrome.notifications", "browser.notifications"]],
+    ["scripting", ["chrome.scripting", "browser.scripting"]],
+  ]);
+  const privileged = new Set([
+    "history",
+    "cookies",
+    "webRequest",
+    "webRequestBlocking",
+    "management",
+    "debugger",
+    "privacy",
+  ]);
+
+  for (const [permission, needles] of apiPermissions) {
+    const used = needles.some((needle) => source.includes(needle));
+    if (used && !declared.has(permission) && permission !== "webRequestBlocking") {
+      securityFinding({
+        ruleId: "MISSING_API_PERMISSION",
+        severity: "high",
+        confidence: "high",
+        evidence: needles.find((needle) => source.includes(needle)),
+        title: `Code uses ${permission} API without matching manifest permission`,
+        impact:
+          "The affected feature can fail at runtime and the submitted extension may not behave as reviewed.",
+        recommendation:
+          `Declare the narrowest permission required for this feature, or remove obsolete ${permission} API usage.`,
+      });
+    }
+
+    if (required.has(permission) && privileged.has(permission) && !used) {
+      securityFinding({
+        ruleId: "UNUSED_PRIVILEGED_PERMISSION",
+        severity: "medium",
+        confidence: "heuristic",
+        evidence: permission,
+        title: `Privileged ${permission} permission is not used in reviewed source`,
+        impact:
+          "An unnecessary privileged permission increases install-time trust cost and can create avoidable store-review scrutiny.",
+        recommendation:
+          "Confirm the permission is genuinely required. If not, remove it or move it to optional_permissions.",
+      });
+    }
+  }
+}
+
 function scanActiveManifests() {
   const mv3 = manifestFiles.filter(({ content }) => {
     try {
@@ -651,6 +725,7 @@ function scanActiveManifests() {
   for (const candidate of active) {
     scanManifestFile(candidate.file, candidate.content);
   }
+  scanPermissionConsistency(active);
 }
 
 walk(root);
