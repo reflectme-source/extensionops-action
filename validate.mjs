@@ -17,6 +17,14 @@ const ignored = new Set([
 ]);
 const findings = [];
 const manifestFiles = [];
+const packageFiles = [];
+const lockDirs = new Set();
+const lockfileNames = new Set([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+]);
 let manifestSeen = false;
 let permissionPenalty = 0;
 let scannedFiles = 0;
@@ -51,6 +59,9 @@ function walk(dir) {
       continue;
     }
     const relative = path.relative(root, full).replaceAll("\\", "/");
+    if (lockfileNames.has(path.posix.basename(relative))) {
+      lockDirs.add(path.posix.dirname(relative) === "." ? "" : path.posix.dirname(relative));
+    }
     if (!shouldScan(relative)) continue;
     const stat = fs.statSync(full);
     if (stat.size > 512_000) continue;
@@ -317,6 +328,9 @@ function scanFile(file, content) {
   if (isChromeManifestPath(file)) {
     manifestFiles.push({ file, content });
   }
+  if (/(^|\/)package\.json$/i.test(file)) {
+    packageFiles.push({ file, content });
+  }
 }
 
 function manifestFinding({
@@ -496,6 +510,134 @@ function scanManifestFile(file, content) {
   permissionPenalty = Math.max(permissionPenalty, Math.min(localPermissionPenalty, 75));
 }
 
+function dependencyFinding({
+  ruleId,
+  severity,
+  file,
+  evidence,
+  title,
+  impact,
+  recommendation,
+  confidence = "deterministic",
+  reference = "https://docs.npmjs.com/cli/v11/configuring-npm/package-json",
+}) {
+  addFinding({
+    ruleId,
+    ruleVersion: "1.0.0",
+    severity,
+    confidence,
+    file,
+    evidence:
+      evidence === undefined ? undefined : redactEvidence(evidence, 500),
+    title,
+    impact,
+    recommendation,
+    policySource: reference,
+  });
+}
+
+function isPinnedGitSpec(spec) {
+  if (!/(?:^git\+|^git:|^github:|github\.com)/i.test(spec)) return true;
+  const fragment = spec.split("#")[1] ?? "";
+  return /^[0-9a-f]{40}$/i.test(fragment);
+}
+
+function scanDependencyFiles() {
+  for (const candidate of packageFiles) {
+    let pkg;
+    try {
+      pkg = JSON.parse(candidate.content);
+    } catch {
+      dependencyFinding({
+        ruleId: "PACKAGE_JSON_PARSE",
+        severity: "high",
+        file: candidate.file,
+        title: "package.json cannot be parsed",
+        impact: "Build reproducibility and dependency verification are blocked.",
+        recommendation: "Fix package.json syntax before release validation.",
+      });
+      continue;
+    }
+
+    const dir =
+      path.posix.dirname(candidate.file) === "."
+        ? ""
+        : path.posix.dirname(candidate.file);
+    if (!lockDirs.has(dir)) {
+      dependencyFinding({
+        ruleId: "DEPENDENCY_LOCKFILE_MISSING",
+        severity: "medium",
+        file: candidate.file,
+        title: "Dependency lockfile not detected",
+        impact:
+          "Builds can resolve different transitive dependency versions over time, weakening reproducibility and incident analysis.",
+        recommendation:
+          "Commit the package-manager lockfile used by CI/release builds and use frozen/immutable install mode.",
+        reference:
+          "https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json",
+      });
+    }
+
+    for (const lifecycle of ["preinstall", "install", "postinstall", "prepare"]) {
+      const script = pkg.scripts?.[lifecycle];
+      if (
+        typeof script === "string" &&
+        /(?:\bcurl\b|\bwget\b|Invoke-WebRequest|Invoke-RestMethod|https?:\/\/)/i.test(
+          script,
+        )
+      ) {
+        dependencyFinding({
+          ruleId: "INSTALL_SCRIPT_NETWORK",
+          severity: "high",
+          confidence: "high",
+          file: candidate.file,
+          evidence: `${lifecycle}: ${script}`,
+          title: `Network-capable ${lifecycle} lifecycle script`,
+          impact:
+            "Install-time network execution expands the software supply-chain attack surface before the application build starts.",
+          recommendation:
+            "Remove install-time downloads where possible; otherwise pin and verify fetched artifacts and restrict CI egress.",
+        });
+      }
+    }
+
+    for (const group of [
+      pkg.dependencies,
+      pkg.devDependencies,
+      pkg.optionalDependencies,
+    ]) {
+      for (const [name, raw] of Object.entries(group ?? {})) {
+        if (typeof raw !== "string") continue;
+        if (/^(?:git\+)?http:\/\//i.test(raw)) {
+          dependencyFinding({
+            ruleId: "INSECURE_DEPENDENCY_SOURCE",
+            severity: "high",
+            file: candidate.file,
+            evidence: `${name}: ${raw}`,
+            title: `Dependency ${name} uses an insecure source`,
+            impact:
+              "Dependency content can be intercepted or replaced in transit before build execution.",
+            recommendation:
+              "Use the package registry or an HTTPS/SSH source pinned to an immutable revision.",
+          });
+        } else if (!isPinnedGitSpec(raw)) {
+          dependencyFinding({
+            ruleId: "UNPINNED_GIT_DEPENDENCY",
+            severity: "medium",
+            file: candidate.file,
+            evidence: `${name}: ${raw}`,
+            title: `Git dependency ${name} is not commit-pinned`,
+            impact:
+              "The same dependency declaration can resolve to different code without a package.json change.",
+            recommendation:
+              "Pin Git dependencies to a full immutable commit SHA and retain a lockfile.",
+          });
+        }
+      }
+    }
+  }
+}
+
 function scanActiveManifests() {
   const mv3 = manifestFiles.filter(({ content }) => {
     try {
@@ -512,6 +654,7 @@ function scanActiveManifests() {
 }
 
 walk(root);
+scanDependencyFiles();
 scanActiveManifests();
 
 const blockerCount = findings.filter((f) => f.severity === "blocker").length;
