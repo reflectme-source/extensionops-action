@@ -2,12 +2,45 @@ import fs from "node:fs";
 import path from "node:path";
 
 const root = process.env.GITHUB_WORKSPACE || process.cwd();
-const ignored = new Set([".git", "node_modules", ".next", "dist", "build", "coverage"]);
+const ignored = new Set([
+  ".git",
+  "node_modules",
+  ".next",
+  "dist",
+  "build",
+  "coverage",
+  "docs",
+  "examples",
+  "fixtures",
+  "__tests__",
+  "tests",
+]);
 const findings = [];
 const manifestFiles = [];
 let manifestSeen = false;
 let permissionPenalty = 0;
 let scannedFiles = 0;
+
+const policySource =
+  "https://developer.chrome.com/docs/webstore/program-policies/policies";
+
+function redactEvidence(value, maxLength = 500) {
+  let redacted = String(value ?? "").replace(
+    /(\b(?:api[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|secret)\b\s*[:=]\s*["'])[^"'\r\n]{8,}(["'])/gi,
+    "$1[REDACTED]$2",
+  );
+  for (const pattern of [
+    /sk_(?:live|test)_[A-Za-z0-9_-]{10,}/g,
+    /gh[pousr]_[A-Za-z0-9]{20,}/g,
+    /github_pat_[A-Za-z0-9_]{20,}/g,
+    /xox[baprs]-[A-Za-z0-9-]{10,}/g,
+    /AKIA[0-9A-Z]{16}/g,
+    /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/gi,
+  ]) {
+    redacted = redacted.replace(pattern, "[REDACTED]");
+  }
+  return redacted.slice(0, maxLength);
+}
 
 function walk(dir) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -29,20 +62,42 @@ function walk(dir) {
 
 function isChromeManifestPath(file) {
   const normalized = file.replaceAll("\\", "/").toLowerCase();
-  if (!(normalized === "manifest.json" || normalized.endsWith("/manifest.json"))) return false;
+  if (!(normalized === "manifest.json" || normalized.endsWith("/manifest.json"))) {
+    return false;
+  }
   const excluded = new Set(["firefox", "mozilla", "safari", "edge", "opera"]);
   return !normalized.split("/").some((segment) => excluded.has(segment));
+}
+
+function isExtensionSourceCandidate(file) {
+  const normalized = file.replaceAll("\\", "/");
+  if (!/\.(?:js|mjs|cjs|ts|tsx|jsx|html)$/i.test(normalized)) return false;
+  if (/\.min\.js$/i.test(normalized)) return false;
+  if (
+    /(?:^|\/)(?:node_modules|vendor|dist|build|coverage|docs?|examples?|fixtures?|__tests__|tests?)(?:\/|$)/i.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  return /(?:background|service[-_.]?worker|content|inject|offscreen|side[-_.]?panel|extension|src\/)/i.test(
+    normalized,
+  );
 }
 
 function shouldScan(file) {
   if (file === "manifest.json" || file.endsWith("/manifest.json")) return true;
   if (/^\.github\/workflows\/.*\.ya?ml$/i.test(file)) return true;
-  return /(?:publish|release|deploy|review|chrome|webstore|cws)/i.test(file) &&
-    /\.(?:js|mjs|cjs|ts|sh|bash|ps1|ya?ml)$/i.test(file);
+  if (/package\.json$/i.test(file)) return true;
+  if (isExtensionSourceCandidate(file)) return true;
+  return (
+    /(?:publish|release|deploy|review|chrome|webstore|cws)/i.test(file) &&
+    /\.(?:js|mjs|cjs|ts|sh|bash|ps1|ya?ml)$/i.test(file)
+  );
 }
 
 function addFinding(finding) {
-  findings.push({ ...finding, evidenceVersion: "1" });
+  findings.push({ ...finding, evidenceVersion: "2" });
 }
 
 function isCwsReferenceOnlySource(file, content) {
@@ -57,10 +112,7 @@ function isCwsReferenceOnlySource(file, content) {
     return true;
   }
 
-  if (
-    content.includes("const V1_MARKERS") &&
-    content.includes("scanCwsV1(")
-  ) {
+  if (content.includes("const V1_MARKERS") && content.includes("scanCwsV1(")) {
     return true;
   }
 
@@ -83,6 +135,130 @@ function isCwsReferenceOnlySource(file, content) {
   return false;
 }
 
+function securityFinding({
+  ruleId,
+  severity,
+  file,
+  line,
+  evidence,
+  title,
+  impact,
+  recommendation,
+  confidence = "high",
+}) {
+  addFinding({
+    ruleId,
+    ruleVersion: "1.0.0",
+    severity,
+    confidence,
+    file,
+    line,
+    evidence: evidence === undefined ? undefined : redactEvidence(evidence, 1200),
+    title,
+    impact,
+    recommendation,
+    policySource,
+  });
+}
+
+function scanExtensionSecurity(file, content) {
+  if (!/\.(?:js|mjs|cjs|ts|tsx|jsx|html)$/i.test(file)) return;
+  if (
+    /(?:^|\/)(?:node_modules|vendor|dist|build|coverage|docs?|examples?|fixtures?|__tests__|tests?)(?:\/|$)/i.test(
+      file,
+    )
+  ) {
+    return;
+  }
+
+  const lines = content.split(/\r?\n/);
+
+  lines.forEach((line, index) => {
+    const lineNumber = index + 1;
+
+    if (
+      /<script\b[^>]*\bsrc\s*=\s*["']https?:\/\//i.test(line) ||
+      /\bimportScripts\s*\(\s*["']https?:\/\//i.test(line) ||
+      /\bimport\s*\(\s*["']https?:\/\//i.test(line)
+    ) {
+      securityFinding({
+        ruleId: "REMOTE_HOSTED_CODE",
+        severity: "blocker",
+        file,
+        line: lineNumber,
+        evidence: line.trim().slice(0, 300),
+        title: "Remote executable code is referenced",
+        impact: "High rejection risk and a remote-code supply-chain boundary.",
+        recommendation:
+          "Bundle executable code into the extension package and keep remote responses data-only.",
+      });
+    }
+
+    const httpMatch = line.match(
+      /(?:fetch\s*\(|axios\.(?:get|post|put|patch|delete)\s*\(|\.open\s*\([^,]+,)\s*["'](http:\/\/[^"']+)/i,
+    );
+    if (
+      httpMatch?.[1] &&
+      !/^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(
+        httpMatch[1],
+      )
+    ) {
+      securityFinding({
+        ruleId: "INSECURE_HTTP_ENDPOINT",
+        severity: "medium",
+        file,
+        line: lineNumber,
+        evidence: httpMatch[1].slice(0, 220),
+        title: "Unencrypted HTTP endpoint used by extension code",
+        impact: "Data integrity/privacy risk and avoidable review friction.",
+        recommendation: "Use HTTPS for production network endpoints.",
+      });
+    }
+
+    const secretMatch = line.match(
+      /\b(?:api[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|secret)\b\s*[:=]\s*["']([^"'\r\n]{20,})["']/i,
+    );
+    if (
+      secretMatch &&
+      /^[A-Za-z0-9_\-./+=]{20,}$/.test(secretMatch[1]) &&
+      !/(?:example|placeholder|changeme|your[_-])/i.test(secretMatch[1])
+    ) {
+      securityFinding({
+        ruleId: "HARDCODED_SECRET",
+        severity: "high",
+        confidence: "heuristic",
+        file,
+        line: lineNumber,
+        evidence: "[credential-like value redacted]",
+        title: "Possible hard-coded secret in extension source",
+        impact:
+          "Secrets shipped in an extension are recoverable and can become account or API abuse vectors.",
+        recommendation:
+          "Remove the credential from the client bundle and move privileged operations behind an authenticated backend.",
+      });
+    }
+  });
+
+  if (
+    /\bonMessageExternal\.addListener\s*\(/.test(content) &&
+    !/(?:sender\.(?:id|origin|url)|allowedSender|allowedOrigin|trustedSender)/.test(
+      content,
+    )
+  ) {
+    securityFinding({
+      ruleId: "EXTERNAL_MESSAGE_VALIDATION",
+      severity: "medium",
+      confidence: "heuristic",
+      file,
+      title: "External message handler has no visible sender validation",
+      impact:
+        "An overly permissive messaging boundary can expose privileged extension actions to untrusted callers.",
+      recommendation:
+        "Validate sender.id/origin against an explicit allowlist before privileged actions.",
+    });
+  }
+}
+
 function scanFile(file, content) {
   const lines = content.split(/\r?\n/);
   const cwsReferenceOnly = isCwsReferenceOnlySource(file, content);
@@ -95,22 +271,26 @@ function scanFile(file, content) {
         severity: "blocker",
         file,
         line: index + 1,
-        evidence: line.trim().slice(0, 500),
+        evidence: redactEvidence(line.trim(), 500),
         policySource: "https://developer.chrome.com/docs/webstore/api/v1",
       });
     }
     if (/\beval\s*\(|\bnew\s+Function\s*\(/.test(line)) {
-      addFinding({
+      securityFinding({
         ruleId: "REMOTE_CODE_EVAL",
-        ruleVersion: "1.0.0",
         severity: "high",
         file,
         line: index + 1,
         evidence: line.trim().slice(0, 500),
-        policySource: "https://developer.chrome.com/docs/webstore/program-policies/policies",
+        title: "Dynamic code execution detected",
+        impact: "Dynamic code execution weakens reviewability and can violate packaged-code expectations.",
+        recommendation:
+          "Replace runtime code generation with packaged, statically analyzable logic.",
       });
     }
   });
+
+  scanExtensionSecurity(file, content);
 
   if (/\.ya?ml$/i.test(file)) {
     lines.forEach((line, index) => {
@@ -128,7 +308,7 @@ function scanFile(file, content) {
         severity: explicitChrome ? "blocker" : "high",
         file,
         line: index + 1,
-        evidence: context.slice(0, 1200),
+        evidence: redactEvidence(context, 1200),
         policySource: "https://developer.chrome.com/docs/webstore/api/v1",
       });
     });
@@ -139,45 +319,181 @@ function scanFile(file, content) {
   }
 }
 
+function manifestFinding({
+  ruleId,
+  severity,
+  file,
+  evidence,
+  title,
+  impact,
+  recommendation,
+  confidence = "deterministic",
+}) {
+  addFinding({
+    ruleId,
+    ruleVersion: "1.0.0",
+    severity,
+    confidence,
+    file,
+    evidence,
+    title,
+    impact,
+    recommendation,
+    policySource,
+  });
+}
+
 function scanManifestFile(file, content) {
   let localPermissionPenalty = 0;
+
   try {
     const manifest = JSON.parse(content);
+
     if (manifest.manifest_version !== 3) {
-      addFinding({
+      manifestFinding({
         ruleId: "MANIFEST_VERSION",
-        ruleVersion: "1.0.0",
         severity: "blocker",
         file,
         evidence: `manifest_version=${String(manifest.manifest_version)}`,
-        policySource: "https://developer.chrome.com/docs/webstore/program-policies/policies",
+        title: "Chrome-target manifest is not MV3",
+        impact: "The extension cannot use the current Chrome Web Store MV3 release path.",
+        recommendation: "Migrate the Chrome target to Manifest V3 before release.",
       });
     }
-    const risky = new Set([
-      "tabs",
-      "history",
-      "cookies",
-      "webRequest",
-      "webRequestBlocking",
-      "management",
-      "debugger",
+
+    const risky = new Map([
+      ["tabs", 6],
+      ["history", 10],
+      ["cookies", 10],
+      ["webRequest", 8],
+      ["webRequestBlocking", 14],
+      ["management", 14],
+      ["debugger", 18],
     ]);
+
     for (const permission of manifest.permissions || []) {
-      if (risky.has(permission)) localPermissionPenalty += 6;
+      const penalty = risky.get(permission);
+      if (!penalty) continue;
+      localPermissionPenalty += penalty;
+      manifestFinding({
+        ruleId: "SENSITIVE_PERMISSION",
+        severity: penalty >= 14 ? "high" : "medium",
+        file,
+        evidence: permission,
+        title: `Sensitive permission requested: ${permission}`,
+        impact:
+          "Broader privileges increase user trust requirements and can create additional Chrome Web Store scrutiny.",
+        recommendation:
+          "Confirm this permission is required by shipped functionality; remove or narrow it if it is not.",
+      });
     }
+
     if ((manifest.host_permissions || []).includes("<all_urls>")) {
       localPermissionPenalty += 18;
+      manifestFinding({
+        ruleId: "ALL_URLS_PERMISSION",
+        severity: "high",
+        file,
+        evidence: "<all_urls>",
+        title: "Extension requests access to all websites",
+        impact:
+          "Very broad host access increases privacy exposure, permission-warning friction, and store-review risk.",
+        recommendation:
+          "Replace <all_urls> with the smallest explicit host allowlist required by the product.",
+      });
+    }
+
+    if (
+      (manifest.content_scripts || []).some((script) =>
+        (script.matches || []).includes("<all_urls>"),
+      )
+    ) {
+      localPermissionPenalty += 10;
+      manifestFinding({
+        ruleId: "CONTENT_SCRIPT_ALL_URLS",
+        severity: "high",
+        file,
+        evidence: "content_scripts.matches=<all_urls>",
+        title: "Content script runs on all websites",
+        impact:
+          "This creates a large execution and privacy surface and makes least-privilege justification difficult.",
+        recommendation:
+          "Scope content-script matches to only the sites and paths required by the product.",
+      });
+    }
+
+    const externalMatches = manifest.externally_connectable?.matches || [];
+    if (
+      externalMatches.some(
+        (match) => match === "<all_urls>" || match === "*://*/*",
+      )
+    ) {
+      localPermissionPenalty += 12;
+      manifestFinding({
+        ruleId: "EXTERNALLY_CONNECTABLE_WILDCARD",
+        severity: "high",
+        file,
+        evidence: externalMatches.join(", ").slice(0, 300),
+        title: "External messaging is exposed to wildcard origins",
+        impact:
+          "A broad external messaging boundary can expose privileged extension functionality to untrusted callers.",
+        recommendation:
+          "Restrict externally_connectable.matches to an explicit trusted-origin allowlist.",
+      });
+    }
+
+    if (
+      (manifest.web_accessible_resources || []).some(
+        (entry) =>
+          (entry.resources || []).includes("*") &&
+          (entry.matches || []).some(
+            (match) => match === "<all_urls>" || match === "*://*/*",
+          ),
+      )
+    ) {
+      manifestFinding({
+        ruleId: "WEB_ACCESSIBLE_ALL_RESOURCES",
+        severity: "high",
+        file,
+        evidence: "resources=* with wildcard matches",
+        title: "All packaged resources are web-accessible",
+        impact:
+          "Over-broad resource exposure increases the extension's observable and interactable attack surface.",
+        recommendation:
+          "Expose only the exact packaged files and origins that require web access.",
+      });
+    }
+
+    const csp =
+      typeof manifest.content_security_policy === "string"
+        ? manifest.content_security_policy
+        : manifest.content_security_policy?.extension_pages;
+
+    if (csp?.includes("'unsafe-eval'")) {
+      manifestFinding({
+        ruleId: "EXTENSION_CSP_UNSAFE_EVAL",
+        severity: "blocker",
+        file,
+        evidence: "'unsafe-eval'",
+        title: "Extension CSP permits unsafe evaluation",
+        impact:
+          "Release rejection risk and a materially weaker code-execution boundary.",
+        recommendation:
+          "Remove 'unsafe-eval' and use packaged, statically analyzable code.",
+      });
     }
   } catch {
-    addFinding({
+    manifestFinding({
       ruleId: "MANIFEST_PARSE",
-      ruleVersion: "1.0.0",
       severity: "blocker",
       file,
-      policySource: "https://developer.chrome.com/docs/webstore/program-policies/policies",
+      title: "Chrome-target manifest cannot be parsed",
+      impact: "The browser cannot reliably consume this extension manifest.",
+      recommendation: "Fix the JSON syntax before release validation.",
     });
   }
-  permissionPenalty = Math.max(permissionPenalty, localPermissionPenalty);
+
+  permissionPenalty = Math.max(permissionPenalty, Math.min(localPermissionPenalty, 75));
 }
 
 function scanActiveManifests() {
@@ -200,7 +516,15 @@ scanActiveManifests();
 
 const blockerCount = findings.filter((f) => f.severity === "blocker").length;
 const highCount = findings.filter((f) => f.severity === "high").length;
-const rawScore = Math.max(0, 100 - blockerCount * 55 - highCount * 22 - Math.min(permissionPenalty, 60));
+const mediumCount = findings.filter((f) => f.severity === "medium").length;
+const rawScore = Math.max(
+  0,
+  100 -
+    blockerCount * 55 -
+    highCount * 22 -
+    mediumCount * 8 -
+    Math.min(permissionPenalty, 75),
+);
 const score = blockerCount > 0 ? Math.min(rawScore, 49) : rawScore;
 
 const reportDir = path.join(root, ".extensionops");
@@ -210,7 +534,7 @@ fs.writeFileSync(
   reportPath,
   JSON.stringify(
     {
-      schemaVersion: "1",
+      schemaVersion: "2",
       generatedAt: new Date().toISOString(),
       commitSha: process.env.GITHUB_SHA || null,
       scannedFiles,
@@ -228,5 +552,7 @@ if (output) {
   fs.appendFileSync(output, `score=${score}\nreport=.extensionops/report.json\n`);
 }
 
-console.log(`ExtensionOps score: ${score}/100; findings: ${findings.length}`);
+console.log(
+  `ExtensionOps score: ${score}/100; findings: ${findings.length}; blockers: ${blockerCount}; high: ${highCount}; medium: ${mediumCount}`,
+);
 if (blockerCount > 0) process.exitCode = 2;
