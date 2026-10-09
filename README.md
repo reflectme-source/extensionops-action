@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate extension release
         id: extensionops
-        uses: reflectme-source/extensionops-action@v1.0.0
+        uses: reflectme-source/extensionops-action@v1.0.1
         # For supply-chain pinning, replace the tag with the immutable release commit SHA.
         with:
           manifest-path: manifest.json # Optional; omit for auto-discovery.
@@ -46,7 +46,7 @@ jobs:
           if-no-files-found: warn
 ```
 
-**Version note:** Use the released `v1.0.0` tag after it is published, or pin an audited commit SHA. No auto-update or store publication is performed by this action.
+**Version note:** Use the released `v1.0.1` tag after it is published, or pin an audited commit SHA. No auto-update or store publication is performed by this action.
 
 ## Inputs and outputs
 
@@ -70,6 +70,6 @@ For an additional free remote **static** inspection, paste the public GitHub rep
 - [Google Chrome Web Store API V1 reference and sunset](https://developer.chrome.com/docs/webstore/api/v1)
 - [Google Chrome Web Store API V2 usage](https://developer.chrome.com/docs/webstore/using-api)
 
-## License
+## Validator regression tests\n\nRun `node --test test/validator.test.mjs` to check real publishing-script detection and suppress reference-only examples.\n\n## License
 
 MIT. See [LICENSE](./LICENSE).
