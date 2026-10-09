@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate extension release
         id: extensionops
-        uses: reflectme-source/extensionops-action@v1.0.1
+        uses: reflectme-source/extensionops-action@v1.0.2
         # For supply-chain pinning, replace the tag with the immutable release commit SHA.
         with:
           manifest-path: manifest.json # Optional; omit for auto-discovery.
@@ -46,13 +46,22 @@ jobs:
           if-no-files-found: warn
 ```
 
-**Version note:** Use the published `v1.0.1` tag, or pin an audited release commit SHA for stronger supply-chain guarantees. The action does not publish to any browser store.
+**Version note:** Use the published `v1.0.2` tag, or pin an audited release commit SHA for stronger supply-chain guarantees. The action does not publish to any browser store.
+
+## Frameworks with generated manifests (WXT and Plasmo)
+
+Frameworks frequently generate the Chrome manifest during a production build. Validate **after** building so checks use the manifest you will actually ship, not a placeholder source file:
+
+- **WXT:** [Copyable WXT workflow](examples/wxt-release-check.yml) uses `pnpm wxt build` and `manifest-path: .output/chrome-mv3/manifest.json`.
+- **Plasmo:** [Copyable Plasmo workflow](examples/plasmo-release-check.yml) uses `pnpm build` and `manifest-path: build/chrome-mv3-prod/manifest.json`.
+
+These examples use pnpm and assume your repository includes an appropriate lockfile and a compatible `packageManager` setting. Adapt install/build steps to your own project. The validation action does **not** need publishing secrets, submit releases, or inspect unpublished store accounts. It checks the selected generated manifest and reviewable repository source; it is **not** a complete binary audit of all bundled output.
 
 ## Inputs and outputs
 
 | Name | Direction | Description |
 | --- | --- | --- |
-| `manifest-path` | Input | Optional path to `manifest.json`; leave blank for auto-discovery. |
+| `manifest-path` | Input | Optional workspace-relative path to the actual `manifest.json`, including a generated build output. Leave blank for auto-discovery; a missing, invalid, or out-of-workspace explicit path fails validation. |
 | `score` | Output | Release Confidence Score for checks executed by this action. |
 | `report` | Output | Relative report path: `.extensionops/report.json`. |
 

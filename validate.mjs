@@ -738,7 +738,51 @@ function scanActiveManifests() {
   scanPermissionConsistency(active);
 }
 
+function selectExplicitManifest() {
+  const requested = process.env.EXTENSIONOPS_MANIFEST_PATH?.trim();
+  if (!requested) return;
+
+  // This input is a repository-relative path, never an arbitrary filesystem path.
+  if (path.isAbsolute(requested) || path.win32.isAbsolute(requested)) {
+    throw new Error("manifest-path must be relative to the GitHub workspace.");
+  }
+  const absolute = path.resolve(root, requested);
+  const relative = path.relative(root, absolute);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("manifest-path must stay inside the GitHub workspace.");
+  }
+  if (path.basename(absolute).toLowerCase() !== "manifest.json") {
+    throw new Error("manifest-path must point to a manifest.json file.");
+  }
+
+  // Resolve symlinks before reading, so a checked-in symlink cannot escape the workspace.
+  const rootReal = fs.realpathSync(root);
+  const fileReal = fs.realpathSync(absolute);
+  const realRelative = path.relative(rootReal, fileReal);
+  if (!realRelative || realRelative === ".." || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) {
+    throw new Error("manifest-path resolves outside the GitHub workspace.");
+  }
+  const stat = fs.statSync(fileReal);
+  if (!stat.isFile() || stat.size > 512_000) {
+    throw new Error("manifest-path must reference a regular manifest.json of at most 512 KB.");
+  }
+  const content = fs.readFileSync(fileReal, "utf8");
+  try {
+    const parsed = JSON.parse(content);
+    if (!parsed || typeof parsed !== "object" || ![2, 3].includes(parsed.manifest_version)) {
+      throw new Error("Unsupported manifest version.");
+    }
+  } catch {
+    throw new Error("manifest-path must reference valid browser-extension manifest JSON.");
+  }
+
+  // An explicit manifest is authoritative: do not silently use another target.
+  manifestFiles.length = 0;
+  manifestFiles.push({ file: relative.replaceAll("\\", "/"), content });
+}
+
 walk(root);
+selectExplicitManifest();
 scanDependencyFiles();
 scanActiveManifests();
 
