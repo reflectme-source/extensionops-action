@@ -1,6 +1,9 @@
 name: ExtensionOps Release Validation
-description: Deterministic browser-extension release validation on the customer-owned GitHub runner.
+description: Deterministic browser-extension release checks with JSON evidence on your GitHub runner.
 author: ExtensionOps
+branding:
+  icon: shield
+  color: blue
 inputs:
   manifest-path:
     description: Optional path to manifest.json. Leave blank for auto-discovery.
