@@ -46,7 +46,7 @@ jobs:
           if-no-files-found: warn
 ```
 
-**Version note:** Use the released `v1.0.1` tag after it is published, or pin an audited commit SHA. No auto-update or store publication is performed by this action.
+**Version note:** Use the published `v1.0.1` tag, or pin an audited release commit SHA for stronger supply-chain guarantees. The action does not publish to any browser store.
 
 ## Inputs and outputs
 
@@ -70,6 +70,10 @@ For an additional free remote **static** inspection, paste the public GitHub rep
 - [Google Chrome Web Store API V1 reference and sunset](https://developer.chrome.com/docs/webstore/api/v1)
 - [Google Chrome Web Store API V2 usage](https://developer.chrome.com/docs/webstore/using-api)
 
-## Validator regression tests\n\nRun `node --test test/validator.test.mjs` to check real publishing-script detection and suppress reference-only examples.\n\n## License
+## Validator regression tests
+
+Run `node --test test/validator.test.mjs` to check real publishing-script detection and suppress reference-only examples.
+
+## License
 
 MIT. See [LICENSE](./LICENSE).
