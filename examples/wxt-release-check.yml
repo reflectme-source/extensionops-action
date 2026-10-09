@@ -1,0 +1,31 @@
+# WXT + pnpm reference workflow. Adjust to your repository's build script.
+name: WXT extension release validation
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build extension
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm wxt build
+      - name: Validate built Chrome MV3 manifest and source
+        uses: reflectme-source/extensionops-action@v1.0.2
+        with:
+          manifest-path: .output/chrome-mv3/manifest.json
+      - name: Save validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extensionops-wxt-evidence
+          path: .extensionops/report.json
+          if-no-files-found: warn

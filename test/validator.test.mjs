@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const validator = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../validate.mjs");
 
-function validate(files) {
+function validate(files, manifestPath = "") {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "extensionops-action-"));
   try {
     for (const [relative, contents] of Object.entries(files)) {
@@ -18,12 +18,13 @@ function validate(files) {
     }
     const execution = spawnSync(process.execPath, [validator], {
       cwd: workspace,
-      env: { ...process.env, GITHUB_WORKSPACE: workspace, GITHUB_OUTPUT: "" },
+      env: { ...process.env, GITHUB_WORKSPACE: workspace, GITHUB_OUTPUT: "", EXTENSIONOPS_MANIFEST_PATH: manifestPath },
       encoding: "utf8",
     });
     assert.equal(execution.error, undefined, execution.stderr);
-    const report = JSON.parse(fs.readFileSync(path.join(workspace, ".extensionops/report.json"), "utf8"));
-    return { status: execution.status, report };
+    const reportPath = path.join(workspace, ".extensionops/report.json");
+    const report = fs.existsSync(reportPath) ? JSON.parse(fs.readFileSync(reportPath, "utf8")) : null;
+    return { status: execution.status, report, stderr: execution.stderr };
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
@@ -57,4 +58,52 @@ test("still checks API permissions when extension manifest exists", () => {
   });
   assert.equal(status, 0);
   assert.ok(report.findings.some(f => f.ruleId === "MISSING_API_PERMISSION" && f.severity === "high"));
+});
+
+test("uses a generated Plasmo manifest inside the ignored build directory", () => {
+  const { status, report } = validate({
+    "build/chrome-mv3-prod/manifest.json": JSON.stringify({
+      manifest_version: 3, name: "Built extension", version: "1.0.0", permissions: ["history"],
+    }),
+    "src/content.js": "chrome.history.search({ text: '', maxResults: 5 });",
+  }, "build/chrome-mv3-prod/manifest.json");
+  assert.equal(status, 0);
+  assert.equal(report.manifestSeen, true);
+  assert.ok(!report.findings.some(f => f.ruleId === "MISSING_API_PERMISSION"));
+});
+
+test("explicit WXT output manifest takes precedence over a root manifest", () => {
+  const { status, report } = validate({
+    "manifest.json": JSON.stringify({ manifest_version: 3, name: "Old", version: "1.0.0", permissions: [] }),
+    ".output/chrome-mv3/manifest.json": JSON.stringify({
+      manifest_version: 3, name: "Built", version: "1.0.0", permissions: ["history"],
+    }),
+    "src/content.js": "chrome.history.search({ text: '', maxResults: 5 });",
+  }, ".output/chrome-mv3/manifest.json");
+  assert.equal(status, 0);
+  assert.equal(report.manifestSeen, true);
+  assert.ok(!report.findings.some(f => f.ruleId === "MISSING_API_PERMISSION"));
+});
+
+test("fails closed when configured manifest is missing", () => {
+  const { status, report, stderr } = validate({}, "build/chrome-mv3-prod/manifest.json");
+  assert.notEqual(status, 0);
+  assert.equal(report, null);
+  assert.match(stderr, /ENOENT/);
+});
+
+test("rejects manifest paths that escape the workspace", () => {
+  const { status, report, stderr } = validate({}, "../manifest.json");
+  assert.notEqual(status, 0);
+  assert.equal(report, null);
+  assert.match(stderr, /must stay inside/);
+});
+
+test("rejects malformed configured manifest JSON", () => {
+  const { status, report, stderr } = validate({
+    ".output/chrome-mv3/manifest.json": "{broken",
+  }, ".output/chrome-mv3/manifest.json");
+  assert.notEqual(status, 0);
+  assert.equal(report, null);
+  assert.match(stderr, /valid browser-extension manifest JSON/);
 });
