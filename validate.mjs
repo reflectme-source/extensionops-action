@@ -116,11 +116,18 @@ function isCwsReferenceOnlySource(file, content) {
   const normalized = file.replaceAll("\\", "/").toLowerCase();
 
   if (
-    /(^|\/)(?:test|tests|__tests__|fixtures?|docs?|examples?)(\/|$)/.test(
+    /(^|\/)(?:test|tests|__tests__|fixtures?|docs?|examples?|guides?)(\/|$)/.test(
       normalized,
     ) ||
     /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(normalized)
   ) {
+    return true;
+  }
+
+  // Front-end UI previews and guide pages are examples, not publishing scripts.
+  // Keep API routes and release scripts eligible for V1 detection.
+  if (/^src\/app\/(?!api\/).*page\.[jt]sx$/i.test(normalized) ||
+      /(?:^|\/)landingpreview\.[jt]sx$/i.test(normalized)) {
     return true;
   }
 
@@ -643,6 +650,9 @@ function scanDependencyFiles() {
 }
 
 function scanPermissionConsistency(activeManifests) {
+  // Without a usable manifest there is no declared-permission baseline.
+  // Do not accuse web apps or documentation repositories of missing privileges.
+  if (activeManifests.length === 0) return;
   const required = new Set();
   const optional = new Set();
   for (const candidate of activeManifests) {
